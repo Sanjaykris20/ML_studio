@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ml-studio
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "cd frontend && npm install && npm run build && cd ../backend && pip install -r requirements.txt"
+    startCommand: "cd backend && python run_server.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: NODE_VERSION
+        value: 20.12.0
+      - key: ENVIRONMENT
+        value: production
+    # Note: Render free tier does not support persistent disks.
+    # If upgrading to a paid tier (Starter+), uncomment the disk config below:
+    # disk:
+    #   name: ml-studio-data
+    #   mountPath: /opt/render/project/src/backend/artifacts
+    #   sizeGB: 1
