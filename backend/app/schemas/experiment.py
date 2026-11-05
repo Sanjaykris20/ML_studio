@@ -26,6 +26,31 @@ class ExperimentOut(BaseModel):
         from_attributes = True
 
 
+class FeatureRankingItem(BaseModel):
+    feature: str
+    importance: float
+    rank: int
+    raw_coefficient: Optional[float] = None
+
+
+class FeatureImportanceInfo(BaseModel):
+    supported: bool
+    method: str
+    explanation: Optional[str] = None
+    rankings: List[FeatureRankingItem] = []
+    scores: Dict[str, float] = {}
+    raw_coefficients: Dict[str, float] = {}
+
+
+class FeatureImportanceComparisonOut(BaseModel):
+    model_a: FeatureImportanceInfo
+    model_b: FeatureImportanceInfo
+    differences: Dict[str, float] = {}
+    comparison_method: str = "Normalized Absolute Coefficients (|w|)"
+    comparison_valid: bool = True
+    explanation: Optional[str] = None
+
+
 class ModelComparisonOut(BaseModel):
     task_type: str
     model_a: Dict[str, Any]  # Scratch model summary + metrics
@@ -33,3 +58,4 @@ class ModelComparisonOut(BaseModel):
     metric_differences: Dict[str, float]
     comparison_valid: bool
     notes: Optional[str] = None
+    feature_importance_comparison: Optional[FeatureImportanceComparisonOut] = None
