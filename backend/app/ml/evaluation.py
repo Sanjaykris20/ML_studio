@@ -132,3 +132,135 @@ def evaluate_classification(
         "confusion_matrix": cm_data,
         "roc_curve": roc_points,
     }
+
+
+def extract_feature_importance(
+    model: Any,
+    feature_names: List[str],
+    algorithm: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Extract, normalize, and rank feature importance for supported models.
+
+    Note:
+        Feature importance is computed from the learned coefficients of the
+        preprocessed features (after scaling/encoding). Higher absolute coefficient
+        magnitude (|w|) indicates greater influence on model predictions.
+
+    Args:
+        model: Fitted model instance (Scratch or Scikit-learn wrapper).
+        feature_names: List of preprocessed feature names corresponding to model inputs.
+        algorithm: Optional algorithm identifier ("linear_regression", "logistic_regression", "mlp").
+            If omitted, the function inspects the model class name and attributes.
+
+    Returns:
+        Dict[str, Any] with:
+            - supported (bool): Whether the model architecture supports direct coefficient importance.
+            - method (str): Description of the methodology used (e.g. "Normalized Absolute Coefficients (|w|)").
+            - explanation (Optional[str]): Informative explanation, especially when unsupported.
+            - rankings (List[Dict[str, Any]]): Ranked list of features, from highest to lowest influence.
+                Each element contains:
+                - feature (str): Name of the preprocessed feature.
+                - importance (float): Normalized importance percentage (0.0 to 100.0).
+                - rank (int): 1-based rank (1 is highest influence).
+                - raw_coefficient (float): Raw learned weight/coefficient value.
+            - scores (Dict[str, float]): Map of feature name to importance percentage.
+            - raw_coefficients (Dict[str, float]): Map of feature name to raw learned weight.
+
+    Raises:
+        ValueError: If feature_names is empty, or coefficient dimensions do not match
+            feature_names, or coefficients contain invalid numerical values (NaN, Inf).
+    """
+    algo_str = (algorithm or "").lower().strip()
+    class_name = model.__class__.__name__.lower() if model is not None else ""
+
+    # Keep MLP unsupported: multi-layer non-linear models do not expose direct linear coefficients
+    if algo_str == "mlp" or "mlp" in class_name:
+        return {
+            "supported": False,
+            "method": "Not applicable",
+            "explanation": (
+                "Multilayer Perceptron (MLP) consists of non-linear hidden layers "
+                "without direct linear coefficients. Direct feature importance is "
+                "supported for Linear Regression and Logistic Regression models."
+            ),
+            "rankings": [],
+            "scores": {},
+            "raw_coefficients": {},
+        }
+
+    # Validate feature names list
+    if not feature_names:
+        raise ValueError("feature_names list cannot be empty.")
+
+    # Extract learned weights / coefficients
+    raw_weights = None
+    if hasattr(model, "weights") and model.weights is not None:
+        # Scratch LinearRegression or LogisticRegression
+        raw_weights = model.weights
+    elif hasattr(model, "model") and hasattr(model.model, "coef_") and model.model.coef_ is not None:
+        # SklearnLinearRegressionWrapper or SklearnLogisticRegressionWrapper
+        raw_weights = model.model.coef_
+    elif hasattr(model, "coef_") and model.coef_ is not None:
+        # Direct Scikit-learn LinearRegression or LogisticRegression estimator
+        raw_weights = model.coef_
+    else:
+        raise ValueError(
+            "Model has no learned weights or coefficients. Ensure the model is fitted before extracting feature importance."
+        )
+
+    # Convert to 1D float64 numpy array
+    weights_arr = np.asarray(raw_weights, dtype=np.float64)
+
+    # Handle 2D coefficient shapes from Scikit-learn (e.g. (1, n_features) for binary logistic regression)
+    if weights_arr.ndim == 2:
+        if weights_arr.shape[0] == 1:
+            weights_arr = weights_arr[0]
+        elif weights_arr.shape[0] > 1:
+            # Multi-class: average absolute coefficient across classes
+            weights_arr = np.mean(weights_arr, axis=0)
+
+    # Validate dimensions match feature_names
+    if weights_arr.ndim != 1 or len(weights_arr) != len(feature_names):
+        raise ValueError(
+            f"Feature names count ({len(feature_names)}) does not match coefficient count ({len(weights_arr)})."
+        )
+
+    # Validate numerical integrity
+    if np.isnan(weights_arr).any() or np.isinf(weights_arr).any():
+        raise ValueError("Model coefficients contain NaN or Infinite values.")
+
+    # Calculate absolute magnitude
+    abs_weights = np.abs(weights_arr)
+    total_abs = float(np.sum(abs_weights))
+
+    # Safe handling of zero coefficients
+    if total_abs == 0.0:
+        importances = np.zeros(len(feature_names), dtype=np.float64)
+    else:
+        importances = (abs_weights / total_abs) * 100.0
+
+    # Stable descending sort by absolute magnitude
+    sort_order = np.argsort(-abs_weights, kind="mergesort")
+
+    rankings = [
+        {
+            "feature": feature_names[idx],
+            "importance": round(float(importances[idx]), 2),
+            "rank": rank + 1,
+            "raw_coefficient": round(float(weights_arr[idx]), 6),
+        }
+        for rank, idx in enumerate(sort_order)
+    ]
+
+    scores = {feature_names[i]: round(float(importances[i]), 2) for i in range(len(feature_names))}
+    raw_coefficients = {feature_names[i]: round(float(weights_arr[i]), 6) for i in range(len(feature_names))}
+
+    return {
+        "supported": True,
+        "method": "Normalized Absolute Coefficients (|w|)",
+        "explanation": None,
+        "rankings": rankings,
+        "scores": scores,
+        "raw_coefficients": raw_coefficients,
+    }
+

@@ -23,9 +23,9 @@ from app.db.session import get_db
 from app.db.models import DatasetModel, ExperimentModel, PredictionHistoryModel
 from app.schemas.training import TrainRequest, TrainResponse
 from app.schemas.prediction import PredictRequest, PredictResponse, ModelFeatureInfo, PredictionHistoryOut
-from app.schemas.experiment import ModelComparisonOut
+from app.schemas.experiment import ModelComparisonOut, FeatureImportanceComparisonOut
 from app.ml.preprocessing import DataPreprocessor
-from app.ml.evaluation import evaluate_regression, evaluate_classification
+from app.ml.evaluation import evaluate_regression, evaluate_classification, extract_feature_importance
 from app.ml.pipeline import PipelineBundle, save_pipeline_bundle, load_pipeline_bundle
 from app.ml.scratch.linear_regression import ScratchLinearRegression
 from app.ml.scratch.logistic_regression import ScratchLogisticRegression
@@ -79,7 +79,7 @@ def validate_algorithm_compatibility(
 
 
 @router.post("/train", response_model=TrainResponse, status_code=status.HTTP_201_CREATED)
-async def train_model(req: TrainRequest, db: Session = Depends(get_db)):
+def train_model(req: TrainRequest, db: Session = Depends(get_db)):
 
     """Train machine learning model (scratch or library) with strict leakage prevention."""
     # 1. Fetch Dataset
@@ -316,6 +316,24 @@ async def train_model(req: TrainRequest, db: Session = Depends(get_db)):
             detail=f"Model evaluation failed: {str(e)}",
         )
 
+    # 8b. Extract feature importance for supported models and persist in metrics
+    try:
+        feat_importance = extract_feature_importance(
+            model=model,
+            feature_names=preprocessor.transformed_feature_names_,
+            algorithm=req.algorithm,
+        )
+        eval_metrics["feature_importance"] = feat_importance
+    except Exception as e:
+        eval_metrics["feature_importance"] = {
+            "supported": False,
+            "method": "Not applicable",
+            "explanation": f"Feature importance calculation failed: {str(e)}",
+            "rankings": [],
+            "scores": {},
+            "raw_coefficients": {},
+        }
+
     loss_history = getattr(model, "loss_history", [])
     val_loss_history = getattr(model, "val_loss_history", [])
 
@@ -491,6 +509,56 @@ def get_prediction_history(experiment_id: str, db: Session = Depends(get_db)):
     )
 
 
+def get_or_extract_experiment_feature_importance(experiment: ExperimentModel) -> Dict[str, Any]:
+    """Retrieve feature importance from metrics, or fallback to bundle extraction for older experiments."""
+    metrics = experiment.metrics or {}
+    if "feature_importance" in metrics and isinstance(metrics["feature_importance"], dict):
+        fi = metrics["feature_importance"]
+        if "supported" in fi and "rankings" in fi:
+            return fi
+
+    # Fallback for older experiments: load the pipeline bundle and extract importance
+    try:
+        if experiment.artifact_path:
+            bundle = load_pipeline_bundle(experiment.artifact_path)
+            feat_names = (
+                getattr(bundle.preprocessor, "transformed_feature_names_", None)
+                or experiment.feature_names
+                or []
+            )
+            return extract_feature_importance(
+                model=bundle.model,
+                feature_names=feat_names,
+                algorithm=experiment.algorithm,
+            )
+    except Exception:
+        pass
+
+    # If algorithm is MLP
+    if (experiment.algorithm or "").lower() == "mlp":
+        return {
+            "supported": False,
+            "method": "Not applicable",
+            "explanation": (
+                "Multilayer Perceptron (MLP) consists of non-linear hidden layers "
+                "without direct linear coefficients. Direct feature importance is "
+                "supported for Linear Regression and Logistic Regression models."
+            ),
+            "rankings": [],
+            "scores": {},
+            "raw_coefficients": {},
+        }
+
+    return {
+        "supported": False,
+        "method": "Not applicable",
+        "explanation": "Feature importance data is unavailable for this model artifact.",
+        "rankings": [],
+        "scores": {},
+        "raw_coefficients": {},
+    }
+
+
 @router.get("/compare/{id_a}/{id_b}", response_model=ModelComparisonOut)
 def compare_models(id_a: str, id_b: str, db: Session = Depends(get_db)):
     """Compare two trained models (e.g. Scratch vs. Library) side-by-side."""
@@ -522,6 +590,45 @@ def compare_models(id_a: str, id_b: str, db: Session = Depends(get_db)):
     # Training time delta
     diffs["training_time_ms_delta"] = round(exp_a.training_time_ms - exp_b.training_time_ms, 2)
 
+    # Feature Importance Extraction & Comparison
+    fi_a = get_or_extract_experiment_feature_importance(exp_a)
+    fi_b = get_or_extract_experiment_feature_importance(exp_b)
+
+    fi_differences = {}
+    fi_comparison_valid = False
+    fi_explanation = None
+
+    if fi_a.get("supported") and fi_b.get("supported"):
+        fi_comparison_valid = True
+        scores_a = fi_a.get("scores", {})
+        scores_b = fi_b.get("scores", {})
+        # Combine all features in deterministic order (rankings from A then B)
+        all_features = list(dict.fromkeys(
+            [r["feature"] for r in fi_a.get("rankings", [])] +
+            [r["feature"] for r in fi_b.get("rankings", [])]
+        ))
+        for feat in all_features:
+            val_a = scores_a.get(feat, 0.0)
+            val_b = scores_b.get(feat, 0.0)
+            fi_differences[feat] = round(val_a - val_b, 2)
+    else:
+        fi_comparison_valid = False
+        if not fi_a.get("supported") and not fi_b.get("supported"):
+            fi_explanation = "Neither model supports direct coefficient-based feature importance (MLP models lack linear coefficients)."
+        elif not fi_a.get("supported"):
+            fi_explanation = f"Model A '{exp_a.name}' does not support direct coefficient-based feature importance."
+        else:
+            fi_explanation = f"Model B '{exp_b.name}' does not support direct coefficient-based feature importance."
+
+    fi_comparison = {
+        "model_a": fi_a,
+        "model_b": fi_b,
+        "differences": fi_differences,
+        "comparison_method": "Normalized Absolute Coefficients (|w|)" if fi_comparison_valid else "Not applicable",
+        "comparison_valid": fi_comparison_valid,
+        "explanation": fi_explanation,
+    }
+
     return ModelComparisonOut(
         task_type=exp_a.task_type,
         model_a={
@@ -534,6 +641,7 @@ def compare_models(id_a: str, id_b: str, db: Session = Depends(get_db)):
             "val_loss_history": exp_a.val_loss_history,
             "training_time_ms": exp_a.training_time_ms,
             "created_at": exp_a.created_at,
+            "feature_importance": fi_a,
         },
         model_b={
             "id": exp_b.id,
@@ -545,7 +653,9 @@ def compare_models(id_a: str, id_b: str, db: Session = Depends(get_db)):
             "val_loss_history": exp_b.val_loss_history,
             "training_time_ms": exp_b.training_time_ms,
             "created_at": exp_b.created_at,
+            "feature_importance": fi_b,
         },
         metric_differences=diffs,
         comparison_valid=True,
+        feature_importance_comparison=fi_comparison,
     )
