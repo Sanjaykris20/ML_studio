@@ -111,6 +111,31 @@ export interface PredictionHistoryItem {
   created_at: string;
 }
 
+export interface FeatureRankingItem {
+  feature: string;
+  importance: number;
+  rank: number;
+  raw_coefficient?: number | null;
+}
+
+export interface FeatureImportanceInfo {
+  supported: boolean;
+  method: string;
+  explanation?: string | null;
+  rankings: FeatureRankingItem[];
+  scores: Record<string, number>;
+  raw_coefficients?: Record<string, number>;
+}
+
+export interface FeatureImportanceComparison {
+  model_a: FeatureImportanceInfo;
+  model_b: FeatureImportanceInfo;
+  differences: Record<string, number>;
+  comparison_method: string;
+  comparison_valid: boolean;
+  explanation?: string | null;
+}
+
 export interface ModelComparisonData {
   task_type: TaskType;
   model_a: {
@@ -123,6 +148,7 @@ export interface ModelComparisonData {
     val_loss_history?: number[];
     training_time_ms: number;
     created_at: string;
+    feature_importance?: FeatureImportanceInfo;
   };
   model_b: {
     id: string;
@@ -134,10 +160,12 @@ export interface ModelComparisonData {
     val_loss_history?: number[];
     training_time_ms: number;
     created_at: string;
+    feature_importance?: FeatureImportanceInfo;
   };
   metric_differences: Record<string, number>;
   comparison_valid: boolean;
   notes?: string;
+  feature_importance_comparison?: FeatureImportanceComparison;
 }
 
 export interface SystemHealth {
